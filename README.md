@@ -1,4 +1,4 @@
-RSV bed occupancy by age group
+###RSV bed occupancy by age group
 Run
 Install readxl, forecast, ranger, xgboost and ggplot2 if needed. Set folder at the top of both scripts. In RStudio, Source RSV_analysis.R, then plot_all_models.R. Use print(admission_plot) for the original data. All plots are saved in output/model_plots/.
 
