@@ -1,5 +1,7 @@
-# 1. Open PHO_RSV_Bed_Occupancy.Rproj before running this script.
-if (basename(getwd()) == "scripts") setwd("..")
+# Set the project folder. Change this path only if you move the folder.
+
+setwd("/Users/williamwang/Desktop/PHO_RSV_Bed_Occupancy")
+
 stopifnot(dir.exists("data"), dir.exists("output"))
 library(ggplot2)
 actual <- read.csv("data/original_data.csv")
@@ -8,7 +10,7 @@ backtest <- subset(read.csv("output/backtest_predictions.csv"), stage == "holdou
 actual$week_start <- as.Date(actual$week_start)
 future$week_start <- as.Date(future$week_start)
 backtest$target <- as.Date(backtest$target)
-models <- c("ETS", "ARIMA", "Random_forest", "XGBoost")
+models <- c("ETS", "ARIMAX", "Random_forest", "XGBoost")
 future$model <- factor(future$model, levels = models)
 backtest$model <- factor(backtest$model, levels = models)
 dir.create("output/model_plots", showWarnings = FALSE)
@@ -46,7 +48,7 @@ for (age in unique(future$age_group)) {
     geom_point(data = f, aes(week_start, forecast, color = "Forecast")) +
     facet_wrap(~model, ncol = 1) + scale_color_manual(values = colors, name = NULL) +
     labs(title = paste("Two-week forecasts: age", age), x = "Week start", y = y_label,
-      subtitle = "80%/95% intervals: model-based (ETS/ARIMA), empirical rolling errors (ML).")
+      subtitle = "80%/95% intervals: model-based (ETS/ARIMAX), empirical rolling errors (ML).")
   ggsave(paste0("output/model_plots/forecast_age_", label, ".png"), future_plot, width = 11, height = 11, dpi = 160)
 }
 print(admission_plot)

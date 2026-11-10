@@ -1,5 +1,6 @@
-# 1. Open PHO_RSV_Bed_Occupancy.Rproj before running this script.
-if (basename(getwd()) == "scripts") setwd("..")
+# Set the project folder. Change this path only if you move the folder.
+setwd("/Users/williamwang/Desktop/PHO_RSV_Bed_Occupancy")
+
 stopifnot(dir.exists("data"), dir.exists("output"))
 library(readxl)
 library(forecast)
@@ -13,7 +14,7 @@ all_data <- data.frame(week_start = as.Date(raw[[1]]), occupancy_rate = raw[[2]]
 write.csv(all_data, "data/original_data.csv", row.names = FALSE)
 latest <- max(all_data$week_start)
 groups <- unique(all_data$age_group[all_data$week_start == latest & !is.na(all_data$occupancy_rate)])
-models <- c("ETS", "ARIMA", "Random_forest", "XGBoost")
+models <- c("ETS", "ARIMAX", "Random_forest", "XGBoost")
 
 # 3. Short-series features use only information available at the forecast origin.
 # Two separate ML models predict weeks 1 and 2. Parameters are fixed, not tuned on holdout data.
@@ -28,13 +29,19 @@ features <- function(v, t, h) {
 
 predict_four <- function(v) {
   z <- ts(v, frequency = 1)
+  # Remove constant regressors using this training window only.
+  used <- apply(external[seq_along(v), , drop = FALSE], 2, sd) > 1e-8
+  training_xreg <- if (any(used)) external[seq_along(v), used, drop = FALSE] else NULL
+  future_xreg <- if (any(used)) external[length(v) + 1:2, used, drop = FALSE] else NULL
   fitted <- list(
     ETS = ets(z, model = "ZZN", allow.multiplicative.trend = FALSE),
-    ARIMA = auto.arima(z, seasonal = FALSE, stepwise = TRUE, approximation = TRUE,
+    ARIMAX = auto.arima(z, xreg = training_xreg, seasonal = FALSE, stepwise = TRUE, approximation = TRUE,
       max.p = 2, max.q = 2, max.P = 1, max.Q = 1, max.d = 1, max.D = 1))
   result <- list()
-  for (m in c("ETS", "ARIMA")) {
-    fc <- forecast(fitted[[m]], h = 2, level = c(80, 95))
+  for (m in c("ETS", "ARIMAX")) {
+    fc <- if (m == "ARIMAX" && any(used)) {
+      forecast(fitted[[m]], xreg = future_xreg, h = 2, level = c(80, 95))
+    } else forecast(fitted[[m]], h = 2, level = c(80, 95))
     result[[m]] <- data.frame(model = m, horizon = 1:2, forecast = as.numeric(fc$mean),
       lower80 = as.numeric(fc$lower[, "80%"]), upper80 = as.numeric(fc$upper[, "80%"]),
       lower95 = as.numeric(fc$lower[, "95%"]), upper95 = as.numeric(fc$upper[, "95%"]))
@@ -73,7 +80,38 @@ predict_four <- function(v) {
 }
 
 
-# 4. Evaluate each current age group separately; do not add age-specific rates.
+# 4. Map old groups to external predictors. Never add age-specific rates.
+source_groups <- list("<1"="0 to 4", "1"="0 to 4", "2 to 4"="0 to 4",
+  "5 to 17"=c("5 to 11", "12 to 17"), "18 to 49"="18 to 64",
+  "50 to 64"="18 to 64", "65 to 74"="65+", "75+"="65+")
+# Freeze old models before the new definitions start. Their later values are
+# forecasts, NOT observations or reconstructed new-group rates.
+new_start <- min(all_data$week_start[all_data$age_group %in% groups & !is.na(all_data$occupancy_rate)])
+new_dates <- seq(new_start, latest + 14, by = "7 days")
+old_models <- list(); old_forecasts <- list(); external_audit <- list()
+for (source in unique(unlist(source_groups))) {
+  old <- all_data[all_data$age_group == source & !is.na(all_data$occupancy_rate) &
+    all_data$week_start < new_start, ]
+  old <- old[order(old$week_start), ]
+  stopifnot(all(diff(old$week_start) == 7), max(old$week_start) < new_start)
+  model <- auto.arima(ts(old$occupancy_rate, frequency = 52), seasonal = TRUE,
+    stepwise = TRUE, approximation = TRUE, max.p = 2, max.q = 2,
+    max.P = 1, max.Q = 1, max.d = 1, max.D = 1)
+  steps <- as.integer((max(new_dates) - max(old$week_start))/7)
+  projected <- pmax(0, as.numeric(forecast(model, h = steps)$mean))
+  dates <- max(old$week_start) + 7*seq_len(steps)
+  old_forecasts[[source]] <- projected[match(new_dates, dates)]
+  old_models[[source]] <- model
+  external_audit[[source]] <- data.frame(source_age = source,
+    source_start = min(old$week_start), source_end = max(old$week_start),
+    week_start = new_dates, projected_rate = old_forecasts[[source]])
+  cat("Frozen external predictor:", source, "\n")
+}
+write.csv(do.call(rbind, external_audit), "output/external_predictors.csv", row.names = FALSE)
+saveRDS(old_models, "output/external_source_models.rds")
+xreg_audit <- list()
+# Evaluate each current age group separately.
+
 all_backtests <- list(); all_scores <- list(); all_forecasts <- list(); saved_models <- list()
 for (age in groups) {
   dat <- all_data[all_data$age_group == age & !is.na(all_data$occupancy_rate), ]
@@ -83,11 +121,19 @@ for (age in groups) {
   n <- length(y)
   initial <- 26; test_weeks <- 18
   stopifnot(n > initial + test_weeks + 2)
+  external <- do.call(cbind, old_forecasts[source_groups[[age]]])
+  colnames(external) <- make.names(source_groups[[age]])
+  stopifnot(nrow(external) == n+2, !anyNA(external))
   development <- initial:(n - test_weeks - 2)
   holdout <- (n - test_weeks):(n - 2)
   rows <- list()
   for (i in c(development, holdout)) {
     z <- predict_four(y[1:i])$predictions
+    used <- apply(external[1:i, , drop = FALSE], 2, sd) > 1e-8
+    xreg_audit[[length(xreg_audit)+1]] <- data.frame(age_group = age,
+      origin = dat$week_start[i], training_weeks = i,
+      source_end = new_start - 7, external_columns_available = ncol(external),
+      external_columns_used = sum(used))
     z$stage <- if (i %in% development) "development" else "holdout"
     z$origin <- dat$week_start[i]
     z$target <- dat$week_start[i + z$horizon]
@@ -136,7 +182,7 @@ for (age in groups) {
   future$week_start <- max(dat$week_start) + 7 * future$horizon
   future$week_end <- future$week_start + 6
   future$selected <- future$model == winner
-  future$interval_method <- ifelse(future$model %in% c("ETS", "ARIMA"),
+  future$interval_method <- ifelse(future$model %in% c("ETS", "ARIMAX"),
     "model-based nominal", "empirical rolling residual quantiles")
   future$age_group <- age; scores$age_group <- age; backtest$age_group <- age
   all_forecasts[[age]] <- future; all_scores[[age]] <- scores; all_backtests[[age]] <- backtest
@@ -146,6 +192,7 @@ for (age in groups) {
 future <- do.call(rbind, all_forecasts)
 scores <- do.call(rbind, all_scores)
 backtest <- do.call(rbind, all_backtests)
+write.csv(do.call(rbind,xreg_audit), "output/arimax_regressor_audit.csv", row.names = FALSE)
 write.csv(future, "output/all_models_forecast.csv", row.names = FALSE)
 write.csv(subset(future, selected), "output/selected_forecast.csv", row.names = FALSE)
 write.csv(scores, "output/model_comparison.csv", row.names = FALSE)

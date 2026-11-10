@@ -1,5 +1,7 @@
+# Set the project folder. Change this path only if you move the folder.
+setwd("/Users/williamwang/Desktop/PHO_RSV_Bed_Occupancy")
+
 # Run from the project root after analysis; no model retraining is needed.
-if (basename(getwd()) == "scripts") setwd("..")
 library(readxl)
 raw <- read_excel("data/RSV_source.xlsx", skip=2, col_types=c("date","numeric","text","date","date"))
 a <- read.csv("data/original_data.csv")
@@ -9,7 +11,7 @@ b <- read.csv("output/backtest_predictions.csv")
 s <- read.csv("output/model_comparison.csv")
 f <- read.csv("output/all_models_forecast.csv")
 q <- read.csv("output/selected_forecast.csv")
-stopifnot(setequal(unique(b$model),c("ETS","ARIMA","Random_forest","XGBoost")),
+stopifnot(setequal(unique(b$model),c("ETS","ARIMAX","Random_forest","XGBoost")),
           all(b$origin < b$target), all(f$forecast >= 0), all(f$lower95 >= 0),
           all(f$lower95 <= f$lower80), all(f$lower80 <= f$upper80), all(f$upper80 <= f$upper95))
 # Recompute all metrics from individual rolling predictions.
@@ -44,3 +46,11 @@ for(h in 1:2) {
 }
 for(file in c("scripts/main.R",list.files("R",full.names=TRUE,pattern="\\.R$"))) invisible(parse(file))
 cat("PASS: source data, temporal splits, feature leakage, metrics, selections, intervals and syntax.\n")
+# ARIMAX regressors are forecasts from source data frozen before new-group histories.
+x <- read.csv("output/external_predictors.csv")
+u <- read.csv("output/arimax_regressor_audit.csv")
+stopifnot(all(x$source_end < x$week_start),all(u$source_end < u$origin),
+          all(u$external_columns_used <= u$external_columns_available),
+          all(x$projected_rate >= 0), !anyNA(x))
+stopifnot(setequal(unique(x$source_age),c("0 to 4","5 to 11","12 to 17","18 to 64","65+")))
+cat("PASS: frozen old-group source chronology and external-variable audit.\n")
